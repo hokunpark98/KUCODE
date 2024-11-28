@@ -510,7 +510,7 @@ export default {
 
       return this.posts.map(item => {
         let rowData = {
-          '학수번호': item.course_id_for_stats,
+          '학수번호': item.course_id,
           '과목명': item.course_name
         };
 
@@ -526,7 +526,7 @@ export default {
             rowData['Total Stars'] = item.stars,
             rowData['KPI Repos'] = item.num_repos ? ((item.num_repos / item.students) * 100).toFixed(2) + '%' : '0%';
             rowData['KPI Commits'] = item.commit ? ((item.commit / item.students) * 100).toFixed(2) + '%' : '0%';
-            rowData['KPI contributors'] = item.contributors ? ((item.contributors / item.students) * 100).toFixed(10) + '%' : '0%';
+            rowData['KPI contributors'] = item.contributors ? ((item.contributors / item.students) * 100).toFixed(2) + '%' : '0%';
 
           } else {
             // '학생별' 탭
