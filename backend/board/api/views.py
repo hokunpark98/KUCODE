@@ -10,7 +10,7 @@ import json
 
 from board.models import Post, File, CompanyRepo, TrendingRepo, Comment
 from login.models import Member
-from board.services.google_drive import GoogleDriveService, GoogleDriveServiceError
+# from board.services.google_drive import GoogleDriveService, GoogleDriveServiceError
 
 
 class HealthCheckAPIView(APIView):
@@ -262,85 +262,85 @@ def update_post(request):
         return JsonResponse({"status": "Error", "message": str(e)}, status=500)
         
 @csrf_exempt
-def upload_file_to_drive(request):
-    """
-    Upload a file to Google Drive and create a File record.
-    Requires ENABLE_BOARD_DRIVE_UPLOAD to be True.
-    """
-    if request.method != 'POST':
-        return JsonResponse({"status": "Error", "message": "Only POST method is allowed"}, status=405)
+# def upload_file_to_drive(request):
+#     """
+#     Upload a file to Google Drive and create a File record.
+#     Requires ENABLE_BOARD_DRIVE_UPLOAD to be True.
+#     """
+#     if request.method != 'POST':
+#         return JsonResponse({"status": "Error", "message": "Only POST method is allowed"}, status=405)
 
-    # Check if Drive upload is enabled
-    if not settings.ENABLE_BOARD_DRIVE_UPLOAD:
-        return JsonResponse({
-            "status": "Error",
-            "message": "Google Drive upload is not enabled"
-        }, status=403)
+#     # Check if Drive upload is enabled
+#     if not settings.ENABLE_BOARD_DRIVE_UPLOAD:
+#         return JsonResponse({
+#             "status": "Error",
+#             "message": "Google Drive upload is not enabled"
+#         }, status=403)
 
-    try:
-        # Get post_id from POST data
-        post_id = request.POST.get('post_id')
-        display_type = request.POST.get('display_type', 'DOWNLOAD')
+#     try:
+#         # Get post_id from POST data
+#         post_id = request.POST.get('post_id')
+#         display_type = request.POST.get('display_type', 'DOWNLOAD')
 
-        if not post_id:
-            return JsonResponse({"status": "Error", "message": "post_id is required"}, status=400)
+#         if not post_id:
+#             return JsonResponse({"status": "Error", "message": "post_id is required"}, status=400)
 
-        # Verify post exists
-        try:
-            post = Post.objects.get(id=post_id)
-        except Post.DoesNotExist:
-            return JsonResponse({"status": "Error", "message": "post not found"}, status=404)
+#         # Verify post exists
+#         try:
+#             post = Post.objects.get(id=post_id)
+#         except Post.DoesNotExist:
+#             return JsonResponse({"status": "Error", "message": "post not found"}, status=404)
 
-        # Get uploaded file
-        if 'file' not in request.FILES:
-            return JsonResponse({"status": "Error", "message": "No file provided"}, status=400)
+#         # Get uploaded file
+#         if 'file' not in request.FILES:
+#             return JsonResponse({"status": "Error", "message": "No file provided"}, status=400)
 
-        uploaded_file = request.FILES['file']
-        if not uploaded_file.name:
-            return JsonResponse({"status": "Error", "message": "File has no name"}, status=400)
+#         uploaded_file = request.FILES['file']
+#         if not uploaded_file.name:
+#             return JsonResponse({"status": "Error", "message": "File has no name"}, status=400)
 
-        # Upload to Google Drive
-        try:
-            drive_service = GoogleDriveService()
-            drive_result = drive_service.upload_file(
-                uploaded_file,
-                uploaded_file.name,
-                uploaded_file.content_type
-            )
-        except GoogleDriveServiceError as e:
-            return JsonResponse({
-                "status": "Error",
-                "message": f"Failed to upload to Google Drive: {str(e)}"
-            }, status=500)
+#         # Upload to Google Drive
+#         try:
+#             drive_service = GoogleDriveService()
+#             drive_result = drive_service.upload_file(
+#                 uploaded_file,
+#                 uploaded_file.name,
+#                 uploaded_file.content_type
+#             )
+#         except GoogleDriveServiceError as e:
+#             return JsonResponse({
+#                 "status": "Error",
+#                 "message": f"Failed to upload to Google Drive: {str(e)}"
+#             }, status=500)
 
-        # Extract file extension
-        file_extension = uploaded_file.name.rsplit('.', 1)[-1] if '.' in uploaded_file.name else ''
+#         # Extract file extension
+#         file_extension = uploaded_file.name.rsplit('.', 1)[-1] if '.' in uploaded_file.name else ''
 
-        # Create File record in database
-        file_obj = File.objects.create(
-            post=post,
-            file_name=drive_result['name'],
-            storage_link=drive_result['web_view_link'],
-            file_extension=file_extension,
-            display_type=display_type
-        )
+#         # Create File record in database
+#         file_obj = File.objects.create(
+#             post=post,
+#             file_name=drive_result['name'],
+#             storage_link=drive_result['web_view_link'],
+#             file_extension=file_extension,
+#             display_type=display_type
+#         )
 
-        return JsonResponse({
-            "status": "OK",
-            "message": "File uploaded successfully",
-            "file": {
-                "id": file_obj.id,
-                "file_name": file_obj.file_name,
-                "storage_link": file_obj.storage_link,
-                "file_extension": file_obj.file_extension,
-                "display_type": file_obj.display_type,
-                "drive_file_id": drive_result['file_id'],
-                "file_size": drive_result['size']
-            }
-        }, status=201)
+#         return JsonResponse({
+#             "status": "OK",
+#             "message": "File uploaded successfully",
+#             "file": {
+#                 "id": file_obj.id,
+#                 "file_name": file_obj.file_name,
+#                 "storage_link": file_obj.storage_link,
+#                 "file_extension": file_obj.file_extension,
+#                 "display_type": file_obj.display_type,
+#                 "drive_file_id": drive_result['file_id'],
+#                 "file_size": drive_result['size']
+#             }
+#         }, status=201)
 
-    except Exception as e:
-        return JsonResponse({"status": "Error", "message": str(e)}, status=500)
+#     except Exception as e:
+#         return JsonResponse({"status": "Error", "message": str(e)}, status=500)
 
 
 @csrf_exempt

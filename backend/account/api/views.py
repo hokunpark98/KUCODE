@@ -469,21 +469,21 @@ def student_read_course_info(request):
                         
                         if course in course_dict:
                             stats = course_dict[course]
-                            stats['commit'] += repo.contributed_commit_count or 0
-                            stats['pr'] += (repo.contributed_open_pr_count or 0) + \
-                                          (repo.contributed_closed_pr_count or 0)
-                            stats['issue'] += (repo.contributed_open_issue_count or 0) + \
-                                             (repo.contributed_closed_issue_count or 0)
+                            stats['commit'] += repo.commit_count or 0
+                            stats['pr'] += (repo.open_pr_count or 0) + \
+                                          (repo.closed_pr_count or 0)
+                            stats['issue'] += (repo.open_issue_count or 0) + \
+                                             (repo.closed_issue_count or 0)
                             stats['repo'] += 1
                             stats['star'] += repo.star_count or 0
                             stats['contributors'] += contributor_counts.get(sanitized_url, 0)
                     else:
                         # 기타 repo
-                        etc_stats['commit'] += repo.contributed_commit_count or 0
-                        etc_stats['pr'] += (repo.contributed_open_pr_count or 0) + \
-                                           (repo.contributed_closed_pr_count or 0)
-                        etc_stats['issue'] += (repo.contributed_open_issue_count or 0) + \
-                                             (repo.contributed_closed_issue_count or 0)
+                        etc_stats['commit'] += repo.commit_count or 0
+                        etc_stats['pr'] += (repo.open_pr_count or 0) + \
+                                           (repo.closed_pr_count or 0)
+                        etc_stats['issue'] += (repo.open_issue_count or 0) + \
+                                             (repo.closed_issue_count or 0)
                         etc_stats['repo'] += 1
                         etc_stats['star'] += repo.star_count or 0
                         etc_stats['contributors'] += contributor_counts.get(sanitized_url, 0)

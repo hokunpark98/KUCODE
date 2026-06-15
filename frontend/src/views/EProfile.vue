@@ -1769,13 +1769,29 @@ export default {
         }
         
         // repositories에서 첫 번째 레포의 owner_github_id를 사용 (임시)
-        if (responseData && responseData.repositories && responseData.repositories.length > 0) {
-          const firstRepo = responseData.repositories[0]
-          // 현재 사용자가 owner인 경우에만 github_id 사용
-          if (firstRepo.is_owner && firstRepo.owner_github_id) {
-            this.user.github_id = firstRepo.owner_github_id
-          }
+        // if (responseData && responseData.repositories && responseData.repositories.length > 0) {
+        //   const firstRepo = responseData.repositories[0]
+        //   // 현재 사용자가 owner인 경우에만 github_id 사용
+        //   if (firstRepo.is_owner && firstRepo.owner_github_id) {
+        //     this.user.github_id = firstRepo.owner_github_id
+        //   }
+        // }
+
+        // If name exists, set it
+        if (responseData && responseData.student_name) {
+          this.user.name = responseData.student_name
         }
+
+        // If email exists, set it
+        if (responseData && responseData.student_primary_email) {
+          this.user.email = responseData.student_primary_email
+        }
+
+        // If email exists, set it
+        if (responseData && responseData.student_department) {
+          this.user.department = responseData.student_department
+        }
+
         
         // student_introduction이 있으면 업데이트
         if (responseData && responseData.student_introduction) {

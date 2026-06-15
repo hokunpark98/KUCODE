@@ -104,8 +104,9 @@ def course_read_db(request):
                 total_stars=Sum('repo__star_count'),
                 repo_count=Count('id')
             )
-            
-            student_count = course.course_registration_set.count()
+            # 학생 수 계산 방법 변경 (기존: course_course_registration의 course 별 수를 카운트하는 방식 -> 현재: course_course에서 학생 수를 직접 읽는 방식)
+            # student_count = course.course_registration_set.count()
+            student_count = course.student_count
             
             # contributor 계산 (이 부분만 Python 처리)
             contributor_count = 0

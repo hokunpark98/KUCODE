@@ -191,7 +191,7 @@ export default {
           // Option 1: Upload file to Drive
           this.uploadProgress = 'Uploading file to Google Drive...'
           try {
-            await uploadFileToDrive(postId, this.formData.file)
+            // await uploadFileToDrive(postId, this.formData.file)
             console.log('File uploaded to Drive')
           } catch (fileError) {
             console.error('Failed to upload file:', fileError)

@@ -44,10 +44,11 @@ def sync_repo_db(request):
         # 1. Fetch all student information from the database.
         students = Student.objects.all()
         students_list = [{'id': student.id, 'github_id': student.github_id} for student in students]
+        students_list = students_list[::-1]
 
         # 2. Initialize counters and lists to track synchronization results.
         total_student_count = len(students_list)
-        student_count = 0
+        student_count = total_student_count + 1
 
         success_student_count = 0
         failure_student_count = 0
@@ -59,7 +60,211 @@ def sync_repo_db(request):
 
         # 3. Start the synchronization process for each student.
         for student in students_list:
-            student_count += 1
+            student_count -= 1
+            print(f'\n{"="*10} [{student_count}/{total_student_count}] Processing GitHub user: {student["github_id"]} {"="*10}')
+            id = student['id']
+            github_id = student['github_id']
+            
+            # 4. Fetch the latest repository list for the student from the FastAPI endpoint.
+            response = requests.get(f"http://{settings.PUBLIC_IP}:{settings.FASTAPI_PORT}/api/user/repos", params={'github_id': github_id})
+            if response.status_code != 200:
+                message = f"Failed to fetch repositories for GitHub user {github_id}"
+                print(f"[ERROR] {message}")
+                failure_student_count += 1
+                failure_student_details.append({"id": id, "github_id": github_id, "message": message})
+                continue
+            
+            data = response.json()
+            # Handle error if the API response format is not a list
+            if not isinstance(data, list):
+                message = f"Invalid response format for repositories of GitHub user {github_id}"
+                print(f"[ERROR] {message}")
+                failure_student_count += 1
+                failure_student_details.append({"id": id, "github_id": github_id, "message": message})
+                continue
+
+            total_repo_count = len(data)
+            repo_list = [{'id': repo['id'], 'name': repo['name']} for repo in data]
+
+            
+            # 5. Compare the list of repositories stored in the DB with the list from the API to find repositories to delete.
+            # List of repository IDs currently in the database
+            repos_in_db = Repository.objects.filter(owner_github_id=github_id).values_list('id', flat=True)
+            repos_in_db_sorted = sorted(repos_in_db) 
+            print("-"*5 + f"\nDB: {repos_in_db_sorted}")
+
+            # List of the latest repository IDs from FastAPI
+            repo_ids_in_list = sorted([str(repo['id']) for repo in repo_list])
+            print("-"*5 + f"\nFASTAPI: {repo_ids_in_list}")
+
+            # Repositories that are in the DB but not in the FastAPI list (targets for deletion)
+            missing_in_fastapi = set(repos_in_db) - set(repo_ids_in_list)
+
+            if missing_in_fastapi:
+                print("-"*5 + f"\n Need to Remove: {missing_in_fastapi}\n"+"-"*5)
+            else:
+                print("-"*5 + f"\n No repositories need to be removed.\n"+"-"*5)
+
+            # 6. Iterate through repositories that need to be deleted and call the delete function.
+            for repo_id in repos_in_db:
+                if repo_id not in repo_ids_in_list:
+                    # Deletes the repository along with all linked child data (commits, issues, etc.)
+                    remove_repository(github_id, Repository(id=repo_id))
+                    print(f" Repository {repo_id} removed for GitHub ID: {github_id}\n"+"-"*5)
+
+            # 7. Process each repository's information received from the API.
+            repo_count = 0
+            for repo in repo_list:
+                repo_name = repo['name']
+                repo_id = repo['id']
+                repo_count += 1
+                print(f"  [{repo_count}/{total_repo_count}] Processing repository: {repo_name} (ID: {repo_id})")
+                
+                # 7-1. Fetch detailed data for the individual repository.
+                repo_response = requests.get(f"http://{settings.PUBLIC_IP}:{settings.FASTAPI_PORT}/api/repos", params={'github_id': github_id, 'repo_id': repo_id})
+                if repo_response.status_code != 200:
+                    message = f"Failed to fetch data for repo {repo_id} of GitHub user {github_id}"
+                    print(f"[ERROR] {message}")
+                    failure_repo_count += 1
+                    failure_repo_details.append({"github_id": github_id, "repo_id": repo_id, "message": message})
+                    continue
+
+                repo_data = repo_response.json()
+
+                language_percentage = {}
+                try:
+                    language_bytes = repo_data.get('language_bytes', {})
+                    if language_bytes:
+                        total_bytes = sum(language_bytes.values())
+
+                        for language, bytes in language_bytes.items():
+                            percentage = (bytes / total_bytes) * 100
+                            # 소수점 1자리
+                            language_percentage[language] = round(percentage, 1)
+
+                except Exception as e:
+                    # Log an error if one occurs while processing a repository
+                    message = f"Error processing repository {repo_name} (ID: {repo_id}) for GitHub user {github_id}: {str(e)}"
+                    print(f"[ERROR] {message}")
+                    failure_repo_count += 1
+                    failure_repo_details.append({"github_id": github_id, "repo_name": repo_name, "message": message})
+
+                try:
+                    print(f"  {github_id}/{repo_name}: {repo_data}")
+                    # 7-2. Use `update_or_create` to create or update repository information in the database.
+                    repository_record, created = Repository.objects.update_or_create(
+                        owner_github_id=github_id,
+                        id=repo_id,
+                        defaults={
+                            'name': repo_name,
+                            'url': repo_data.get('url'),
+                            'created_at': repo_data.get('created_at'),
+                            'updated_at': repo_data.get('updated_at'),
+                            'forked': repo_data.get('forked'),
+                            'fork_count': repo_data.get('forks_count'),
+                            'star_count': repo_data.get('stars_count'),
+                            'commit_count': repo_data.get('commit_count'),
+                            'open_issue_count': repo_data.get('open_issue_count'),
+                            'closed_issue_count': repo_data.get('closed_issue_count'),
+                            'open_pr_count': repo_data.get('open_pr_count'),
+                            'closed_pr_count': repo_data.get('closed_pr_count'),
+                            'contributed_commit_count': repo_data.get('contributed_commit_count'),
+                            'contributed_open_issue_count': repo_data.get('contributed_open_issue_count'),
+                            'contributed_closed_issue_count': repo_data.get('contributed_closed_issue_count'),
+                            'contributed_open_pr_count': repo_data.get('contributed_open_pr_count'),
+                            'contributed_closed_pr_count': repo_data.get('contributed_closed_pr_count'),
+                            'language': ', '.join(repo_data.get('language', [])) if isinstance(repo_data.get('language'), list) else 'None',
+                            'language_bytes': repo_data.get('language_bytes', {}),
+                            'language_percentage': language_percentage,
+                            'contributors': ', '.join(repo_data.get('contributors', [])) if isinstance(repo_data.get('contributors'), list) else 'None',
+                            'license': repo_data.get('license'),
+                            'has_readme': repo_data.get('has_readme'),
+                            'description': repo_data.get('description'),
+                            'release_version': repo_data.get('release_version'),
+                            'crawled_date': repo_data.get('crawled_date'),
+                        }
+                    )
+                    
+                    action = "Created" if created else "Updated"
+                    print(f"  {action} repository: {repo_name} (ID: {repo_id})")
+                    success_repo_count += 1
+
+                except Exception as e:
+                    # Log an error if one occurs while processing a repository
+                    message = f"Error processing repository {repo_name} (ID: {repo_id}) for GitHub user {github_id}: {str(e)}"
+                    print(f"[ERROR] {message}")
+                    failure_repo_count += 1
+                    failure_repo_details.append({"github_id": github_id, "repo_name": repo_name, "message": message})
+
+            # 8. Calculate the total star count for all of the student's repositories and update the student's record.
+            # Calculate the sum of `star_count` for all repositories of the student.
+            total_star_count = Repository.objects.filter(owner_github_id=github_id).aggregate(total_star_count=Sum('star_count'))['total_star_count'] or 0
+            student_record = Student.objects.get(id=id)
+            # Update the `starred_count` field of the Student model.
+            student_record.starred_count = total_star_count
+            student_record.save()
+
+            print(f"  Total star count ({total_star_count}) for GitHub user {github_id} saved.")
+            success_student_count += 1
+            print(f'{"-"*5} Processed GitHub user: {github_id} {"-"*5}')
+
+        # 9. Return a summary of the operation in JSON format.
+        return JsonResponse({
+            "status": "OK",
+            "message": "Repositories updated successfully",
+            "success_student_count": success_student_count,
+            "failure_student_count": failure_student_count,
+            "failure_student_details": failure_student_details,
+            "success_repo_count": success_repo_count,
+            "failure_repo_count": failure_repo_count,
+            "failure_repo_details": failure_repo_details
+        })
+
+    except Exception as e:
+        # Handle unexpected errors during the entire process
+        return JsonResponse({"status": "Error", "message": str(e)}, status=500)
+# ---------------------------------------------
+
+# ========================================
+# Backend Function
+# ========================================
+# ------------Repo--------------#
+@csrf_exempt
+def sync_repo_db_optional(request):
+    # Exception handling block for the entire process
+    try:
+        # 1. Fetch student information.
+        if request.method == 'POST':
+            try:
+                data = json.loads(request.body)
+                if isinstance(data, list):
+                    students_list = data
+                elif isinstance(data, dict) and 'students' in data:
+                    students_list = data['students']
+                else:
+                    return JsonResponse({"status": "Error", "message": "Invalid data format. Expected a list or 'students' key."}, status=400)
+            except json.JSONDecodeError:
+                return JsonResponse({"status": "Error", "message": "Invalid JSON"}, status=400)
+        else:
+            students = Student.objects.all()
+            students_list = [{'id': student.id, 'github_id': student.github_id} for student in students]
+            students_list = students_list[::-1]
+
+        # 2. Initialize counters and lists to track synchronization results.
+        total_student_count = len(students_list)
+        student_count = total_student_count + 1
+
+        success_student_count = 0
+        failure_student_count = 0
+        failure_student_details = []
+
+        success_repo_count = 0
+        failure_repo_count = 0
+        failure_repo_details = []
+
+        # 3. Start the synchronization process for each student.
+        for student in students_list:
+            student_count -= 1
             print(f'\n{"="*10} [{student_count}/{total_student_count}] Processing GitHub user: {student["github_id"]} {"="*10}')
             id = student['id']
             github_id = student['github_id']
@@ -1316,7 +1521,7 @@ def repo_account_read_db(request):
             body_unicode = request.body.decode('utf-8')
             body_data = json.loads(body_unicode)
             uuid = body_data.get('uuid')
-            student_num = body_data.get('student_num')
+            student_id = body_data.get('student_num')
         except (json.JSONDecodeError, UnicodeDecodeError):
             return JsonResponse({"status": "Error", "message": "Invalid JSON format or character encoding"}, status=400)
         
@@ -1325,14 +1530,18 @@ def repo_account_read_db(request):
 
         try:
             if (uuid == 'empty'):
-                student = Student.objects.get(id=student_num)
-                github_id = student.github_id
+                student = Student.objects.get(id=student_id)
             
             elif (uuid != 'empty'):
                 login_student = LoginStudent.objects.get(member_id=uuid)
                 student_id = login_student.id
                 student = Student.objects.get(id=student_id)
-                github_id = student.github_id
+
+            github_id = student.github_id
+            student_id = student.id
+            student_name = student.name
+            student_primary_email = student.primary_email
+            student_department = student.department
             
             # 1) 모든 레포지토리를 한 번에 로드 (owner + contributor)
             owner_repo_list = Repository.objects.filter(owner_github_id=github_id).prefetch_related(
@@ -1625,6 +1834,11 @@ def repo_account_read_db(request):
         })
 
         response_data = {
+            'student_id': student_id,
+            'github_id': github_id,
+            'student_name': student_name,
+            'student_primary_email': student_primary_email,
+            'student_department': student_department,
             'repositories': data,
             'total_language_percentage': top_5_total_language_percentages,
             'total_contributors_count': total_contributors_count,
@@ -1838,30 +2052,31 @@ class RepoSummaryAnalyzer:
 
     def _analyze_with_llm(self, repo_data: dict, repo_structure: dict, readme_content: str, key_files_content: dict) -> dict:
         """OpenAI를 사용한 종합 분석"""
-        owner = repo_data.get('owner_github_id', 'unknown')
-        repo_name = repo_data.get('name', 'unknown')
-        try:
-            analysis_prompt = self._create_analysis_prompt(repo_data, repo_structure, readme_content, key_files_content)
-            logging.info(f"[LLM CALL] model=gpt-5-nano repo={owner}/{repo_name}")
-            response = self.openai_client.responses.create(
-                model="gpt-5-nano",
-                input=analysis_prompt,
-                reasoning={"effort": "low"},
-                text={"verbosity": "low"},
-            )
-            # GPT-5 Responses API는 output_text 필드에 결과를 담아 반환합니다.
-            output = getattr(response, 'output_text', None)
-            if not output:
-                logging.warning(f"[LLM EMPTY OUTPUT] repo={owner}/{repo_name}")
-                return self._create_fallback_analysis(repo_data, repo_structure, readme_content)
-            try:
-                return json.loads(output)
-            except Exception:
-                logging.warning(f"[LLM NON-JSON OUTPUT] repo={owner}/{repo_name} output_head={output[:120]}")
-                return self._create_fallback_analysis(repo_data, repo_structure, readme_content)
-        except Exception as e:
-            logging.exception(f"[{owner}/{repo_name}] LLM 분석 실패: {e}")
-            return self._create_fallback_analysis(repo_data, repo_structure, readme_content)
+        # owner = repo_data.get('owner_github_id', 'unknown')
+        # repo_name = repo_data.get('name', 'unknown')
+        # try:
+        #     analysis_prompt = self._create_analysis_prompt(repo_data, repo_structure, readme_content, key_files_content)
+        #     logging.info(f"[LLM CALL] model=gpt-5-nano repo={owner}/{repo_name}")
+        #     response = self.openai_client.responses.create(
+        #         model="gpt-5-nano",
+        #         input=analysis_prompt,
+        #         reasoning={"effort": "low"},
+        #         text={"verbosity": "low"},
+        #     )
+        #     # GPT-5 Responses API는 output_text 필드에 결과를 담아 반환합니다.
+        #     output = getattr(response, 'output_text', None)
+        #     if not output:
+        #         logging.warning(f"[LLM EMPTY OUTPUT] repo={owner}/{repo_name}")
+        #         return self._create_fallback_analysis(repo_data, repo_structure, readme_content)
+        #     try:
+        #         return json.loads(output)
+        #     except Exception:
+        #         logging.warning(f"[LLM NON-JSON OUTPUT] repo={owner}/{repo_name} output_head={output[:120]}")
+        #         return self._create_fallback_analysis(repo_data, repo_structure, readme_content)
+        # except Exception as e:
+        #     logging.exception(f"[{owner}/{repo_name}] LLM 분석 실패: {e}")
+        #     return self._create_fallback_analysis(repo_data, repo_structure, readme_content)
+        return 0
 
     def _create_analysis_prompt(self, repo_data: dict, repo_structure: dict, readme_content: str, key_files_content: dict) -> str:
         """LLM 분석용 프롬프트 생성"""
@@ -1934,7 +2149,7 @@ class GenerateRepoSummaryAPIView(APIView):
     요청 본문에 필터 조건이 없으면 모든 레포지토리를 대상으로 분석을 실행합니다.
     """
     def post(self, request, *args, **kwargs):
-        analyzer = RepoSummaryAnalyzer()
+        # analyzer = RepoSummaryAnalyzer()
         queryset = Repository.objects.all()
 
         # 요청 본문에서 필터 조건 가져오기

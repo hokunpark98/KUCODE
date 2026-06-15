@@ -8,6 +8,7 @@ urlpatterns = [
 
 # repo_repository CRUD
   path("sync_repo_db", views.sync_repo_db, name="sync_repo_db"),
+  path("sync_repo_db_optional", views.sync_repo_db_optional, name="sync_repo_db_optional"),
   path("repo_read_db", views.repo_read_db, name="repo_read_db"),
   path("repo_course_read_db", views.repo_course_read_db, name="repo_course_read_db"),
   path("sync_repo_category", views.sync_repo_category, name="sync_repo_category"),
