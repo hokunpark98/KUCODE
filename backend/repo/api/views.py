@@ -16,12 +16,9 @@ from django.db.models import Sum
 
 from repo.models import Repository, Repo_contributor, Repo_issue,Repo_pr, Repo_commit
 from account.models import Student
+from account.api.views import get_students_for_crawling
 from login.models import Student as LoginStudent
 from course.models import Course, Course_project, Course_registration
-from core.crawling_order import (
-    get_repositories_for_crawling,
-    get_students_for_crawling,
-)
 from operator import itemgetter
 import requests
 import json
@@ -33,6 +30,28 @@ from dotenv import load_dotenv
 
 # .env 파일에서 환경 변수 로드
 load_dotenv("~/KUCODE/.env")
+
+
+def get_repositories_for_crawling(request):
+    repositories = list(Repository.objects.all())
+    if request.GET.get("student_order") != "recent_courses":
+        return repositories
+
+    students = get_students_for_crawling(request)
+    github_id_priority = {}
+    for index, student in enumerate(students):
+        if student.github_id:
+            github_id_priority.setdefault(student.github_id, index)
+    default_priority = len(github_id_priority)
+
+    return sorted(
+        repositories,
+        key=lambda repository: github_id_priority.get(
+            repository.owner_github_id,
+            default_priority,
+        ),
+    )
+
 
 class HealthCheckAPIView(APIView):
     def get(self, request):

@@ -12,7 +12,7 @@ from account.models import User,Student
 from login.models import Student as LoginStudent
 from course.models import Course, Course_registration, Course_project
 from repo.models import Repo_commit, Repo_pr ,Repo_issue, Repository,Repo_contributor
-from django.db.models import Sum, Count, Prefetch
+from django.db.models import F, Sum, Count, Prefetch
 from openpyxl import load_workbook
 from django.db.models import Q
 from datetime import datetime
@@ -24,11 +24,46 @@ import json
 import zipfile  # zipfile 모듈 추가
 
 from django.db.models.functions import ExtractYear
-from core.crawling_order import get_students_for_crawling
 
 import requests
 import pandas as pd
 import subprocess
+
+RECENT_COURSES_ORDER = "recent_courses"
+
+
+def get_students_for_crawling(request, reverse_default=False):
+    students = list(Student.objects.all())
+    if request.GET.get("student_order") != RECENT_COURSES_ORDER:
+        return students[::-1] if reverse_default else students
+
+    students_by_id = {student.id: student for student in students}
+    registration_student_ids = Course_registration.objects.filter(
+        student__isnull=False
+    ).order_by(
+        F("course_year").desc(nulls_last=True),
+        F("course_semester").desc(nulls_last=True),
+        "-course_id",
+        "-id",
+    ).values_list("student_id", flat=True)
+
+    ordered_students = []
+    seen_student_ids = set()
+
+    for student_id in registration_student_ids:
+        if student_id in seen_student_ids:
+            continue
+
+        student = students_by_id.get(student_id)
+        if student is not None:
+            ordered_students.append(student)
+            seen_student_ids.add(student_id)
+
+    ordered_students.extend(
+        student for student in students if student.id not in seen_student_ids
+    )
+    return ordered_students
+
 
 class HealthCheckAPIView(APIView):
     def get(self, request):
