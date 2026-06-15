@@ -18,6 +18,10 @@ from repo.models import Repository, Repo_contributor, Repo_issue,Repo_pr, Repo_c
 from account.models import Student
 from login.models import Student as LoginStudent
 from course.models import Course, Course_project, Course_registration
+from core.crawling_order import (
+    get_repositories_for_crawling,
+    get_students_for_crawling,
+)
 from operator import itemgetter
 import requests
 import json
@@ -42,9 +46,8 @@ def sync_repo_db(request):
     # Exception handling block for the entire process
     try:
         # 1. Fetch all student information from the database.
-        students = Student.objects.all()
+        students = get_students_for_crawling(request, reverse_default=True)
         students_list = [{'id': student.id, 'github_id': student.github_id} for student in students]
-        students_list = students_list[::-1]
 
         # 2. Initialize counters and lists to track synchronization results.
         total_student_count = len(students_list)
@@ -246,9 +249,8 @@ def sync_repo_db_optional(request):
             except json.JSONDecodeError:
                 return JsonResponse({"status": "Error", "message": "Invalid JSON"}, status=400)
         else:
-            students = Student.objects.all()
+            students = get_students_for_crawling(request, reverse_default=True)
             students_list = [{'id': student.id, 'github_id': student.github_id} for student in students]
-            students_list = students_list[::-1]
 
         # 2. Initialize counters and lists to track synchronization results.
         total_student_count = len(students_list)
@@ -585,7 +587,7 @@ def sync_repo_contributor_db(request):
 
     try:
         # 2. Fetch all repositories from the database.
-        repositories = Repository.objects.all()
+        repositories = get_repositories_for_crawling(request)
         repo_list = [{'id': repo.id, 'name': repo.name, 'github_id': repo.owner_github_id} for repo in repositories]
         total_repo_count = len(repo_list)
 
@@ -687,7 +689,7 @@ def sync_repo_issue_db(request):
 
     try:
         # 2. Fetch all repositories from the database.
-        repositories = Repository.objects.all()
+        repositories = get_repositories_for_crawling(request)
         repo_list = [{'id': repo.id, 'name': repo.name, 'github_id': repo.owner_github_id} for repo in repositories]
         total_repo_count = len(repo_list)
 
@@ -800,7 +802,7 @@ def sync_repo_pr_db(request):
 
     try:
         # 2. Fetch all repositories from the database.
-        repositories = Repository.objects.all()
+        repositories = get_repositories_for_crawling(request)
         repo_list = [{'id': repo.id, 'name': repo.name, 'github_id': repo.owner_github_id} for repo in repositories]
         total_repo_count = len(repo_list)
 
@@ -915,7 +917,7 @@ def sync_repo_commit_db(request):
 
     try:
         # 2. Fetch all repositories from the database.
-        repositories = Repository.objects.all()
+        repositories = get_repositories_for_crawling(request)
         repo_list = [{'id': repo.id, 'name': repo.name, 'github_id': repo.owner_github_id} for repo in repositories]
         total_repo_count = len(repo_list)
 

@@ -24,6 +24,7 @@ import json
 import zipfile  # zipfile 모듈 추가
 
 from django.db.models.functions import ExtractYear
+from core.crawling_order import get_students_for_crawling
 
 import requests
 import pandas as pd
@@ -40,7 +41,7 @@ class HealthCheckAPIView(APIView):
 def sync_student_db(request):
     try:
         # 1. Fetch all student records from the database.
-        students = Student.objects.all()
+        students = get_students_for_crawling(request)
         student_list = [{'id': student.id, 'github_id': student.github_id} for student in students]
         
         # Initialize counters and lists to track the outcome of the sync process.
