@@ -53,6 +53,131 @@ def get_repositories_for_crawling(request):
     )
 
 
+GITHUB_BASELINE_TIMESTAMP = "2008-01-01T00:00:00Z"
+
+
+def parse_github_timestamp(value):
+    if not value or value == "Unknown":
+        return None
+    parsed = parse_datetime(value)
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        parsed = make_aware(parsed)
+    return parsed
+
+
+def is_remote_timestamp_newer(remote_value, local_value):
+    remote_dt = parse_github_timestamp(remote_value)
+    if remote_dt is None:
+        return False
+    local_dt = parse_github_timestamp(local_value)
+    if local_dt is None:
+        return True
+    return remote_dt > local_dt
+
+
+def max_github_timestamp(*values):
+    latest_value = None
+    latest_dt = None
+    for value in values:
+        parsed = parse_github_timestamp(value)
+        if parsed is None:
+            continue
+        if latest_dt is None or parsed > latest_dt:
+            latest_dt = parsed
+            latest_value = value
+    return latest_value
+
+
+def get_latest_model_timestamp(model, repo_id):
+    return (
+        model.objects.filter(repo_id=repo_id)
+        .exclude(last_update__isnull=True)
+        .exclude(last_update="")
+        .order_by('-last_update')
+        .values_list('last_update', flat=True)
+        .first()
+    )
+
+
+def get_latest_commit_timestamp(repo_id):
+    return get_latest_model_timestamp(Repo_commit, repo_id)
+
+
+def get_latest_issue_pr_timestamp(repo_id):
+    return max_github_timestamp(
+        get_latest_model_timestamp(Repo_issue, repo_id),
+        get_latest_model_timestamp(Repo_pr, repo_id),
+    ) or GITHUB_BASELINE_TIMESTAMP
+
+
+def check_issue_pr_activity(github_id, repo_name, since):
+    response = requests.get(
+        f"http://{settings.PUBLIC_IP}:{settings.FASTAPI_PORT}/api/repos/activity",
+        params={'github_id': github_id, 'repo_name': repo_name, 'since': since},
+        timeout=30,
+    )
+    response.raise_for_status()
+    activity_data = response.json()
+    return bool(activity_data.get('has_updates')), activity_data
+
+
+def should_crawl_repository(repo_record, repo_payload):
+    if repo_record is None:
+        return True, ['new_repository']
+
+    reasons = []
+    remote_updated_at = repo_payload.get('updated_at')
+    remote_pushed_at = repo_payload.get('pushed_at')
+
+    if is_remote_timestamp_newer(remote_updated_at, repo_record.updated_at):
+        reasons.append('repository_updated')
+
+    pushed_baseline = repo_record.pushed_at or get_latest_commit_timestamp(repo_record.id)
+    if is_remote_timestamp_newer(remote_pushed_at, pushed_baseline):
+        reasons.append('repository_pushed')
+
+    if reasons:
+        return True, reasons
+
+    since = get_latest_issue_pr_timestamp(repo_record.id)
+    try:
+        has_activity, activity_data = check_issue_pr_activity(
+            repo_record.owner_github_id,
+            repo_record.name,
+            since,
+        )
+    except Exception as exc:
+        print(f"  [WARN] Failed to check issue/PR activity for {repo_record.name}: {exc}")
+        return True, ['activity_check_failed']
+
+    if has_activity:
+        latest_type = activity_data.get('latest_type') or 'issue_or_pr'
+        return True, [f'{latest_type}_updated']
+
+    return False, []
+
+
+def update_lightweight_repo_state(repo_record, repo_payload):
+    if repo_record is None:
+        return
+
+    fields_to_update = []
+    remote_pushed_at = repo_payload.get('pushed_at')
+    if remote_pushed_at and repo_record.pushed_at != remote_pushed_at:
+        repo_record.pushed_at = remote_pushed_at
+        fields_to_update.append('pushed_at')
+
+    remote_name = repo_payload.get('name')
+    if remote_name and repo_record.name != remote_name:
+        repo_record.name = remote_name
+        fields_to_update.append('name')
+
+    if fields_to_update:
+        repo_record.save(update_fields=fields_to_update)
+
+
 class HealthCheckAPIView(APIView):
     def get(self, request):
         return Response({"status": "OK"}, status=status.HTTP_200_OK)
@@ -77,6 +202,8 @@ def sync_repo_db(request):
         failure_student_details = []
 
         success_repo_count = 0
+        skipped_repo_count = 0
+        skipped_repo_sample = []
         failure_repo_count = 0
         failure_repo_details = []
 
@@ -106,21 +233,29 @@ def sync_repo_db(request):
                 continue
 
             total_repo_count = len(data)
-            repo_list = [{'id': repo['id'], 'name': repo['name']} for repo in data]
+            repo_list = [
+                {
+                    'id': str(repo['id']),
+                    'name': repo['name'],
+                    'updated_at': repo.get('updated_at'),
+                    'pushed_at': repo.get('pushed_at'),
+                }
+                for repo in data
+            ]
 
-            
             # 5. Compare the list of repositories stored in the DB with the list from the API to find repositories to delete.
-            # List of repository IDs currently in the database
-            repos_in_db = Repository.objects.filter(owner_github_id=github_id).values_list('id', flat=True)
-            repos_in_db_sorted = sorted(repos_in_db) 
+            repos_in_db = list(Repository.objects.filter(owner_github_id=github_id))
+            repos_by_id = {str(repo.id): repo for repo in repos_in_db}
+            repo_ids_in_db = set(repos_by_id.keys())
+            repos_in_db_sorted = sorted(repo_ids_in_db)
             print("-"*5 + f"\nDB: {repos_in_db_sorted}")
 
             # List of the latest repository IDs from FastAPI
-            repo_ids_in_list = sorted([str(repo['id']) for repo in repo_list])
+            repo_ids_in_list = sorted([repo['id'] for repo in repo_list])
             print("-"*5 + f"\nFASTAPI: {repo_ids_in_list}")
 
             # Repositories that are in the DB but not in the FastAPI list (targets for deletion)
-            missing_in_fastapi = set(repos_in_db) - set(repo_ids_in_list)
+            missing_in_fastapi = repo_ids_in_db - set(repo_ids_in_list)
 
             if missing_in_fastapi:
                 print("-"*5 + f"\n Need to Remove: {missing_in_fastapi}\n"+"-"*5)
@@ -128,19 +263,34 @@ def sync_repo_db(request):
                 print("-"*5 + f"\n No repositories need to be removed.\n"+"-"*5)
 
             # 6. Iterate through repositories that need to be deleted and call the delete function.
-            for repo_id in repos_in_db:
-                if repo_id not in repo_ids_in_list:
-                    # Deletes the repository along with all linked child data (commits, issues, etc.)
-                    remove_repository(github_id, Repository(id=repo_id))
-                    print(f" Repository {repo_id} removed for GitHub ID: {github_id}\n"+"-"*5)
+            for repo_id in missing_in_fastapi:
+                remove_repository(github_id, Repository(id=repo_id))
+                print(f" Repository {repo_id} removed for GitHub ID: {github_id}\n"+"-"*5)
 
-            # 7. Process each repository's information received from the API.
+            # 7. Process only repositories with detected changes.
             repo_count = 0
             for repo in repo_list:
                 repo_name = repo['name']
                 repo_id = repo['id']
                 repo_count += 1
-                print(f"  [{repo_count}/{total_repo_count}] Processing repository: {repo_name} (ID: {repo_id})")
+                existing_repo = repos_by_id.get(repo_id)
+                print(f"  [{repo_count}/{total_repo_count}] Checking repository: {repo_name} (ID: {repo_id})")
+
+                should_crawl, crawl_reasons = should_crawl_repository(existing_repo, repo)
+                if not should_crawl:
+                    update_lightweight_repo_state(existing_repo, repo)
+                    skipped_repo_count += 1
+                    if len(skipped_repo_sample) < 20:
+                        skipped_repo_sample.append({
+                            "github_id": github_id,
+                            "repo_id": repo_id,
+                            "repo_name": repo_name,
+                            "reason": "no_remote_changes",
+                        })
+                    print(f"  [SKIP] No remote changes detected for repo: {repo_name}.")
+                    continue
+
+                print(f"  [CRAWL] Change detected for repo: {repo_name}. reasons={crawl_reasons}")
                 
                 # 7-1. Fetch detailed data for the individual repository.
                 repo_response = requests.get(f"http://{settings.PUBLIC_IP}:{settings.FASTAPI_PORT}/api/repos", params={'github_id': github_id, 'repo_id': repo_id})
@@ -161,7 +311,7 @@ def sync_repo_db(request):
 
                         for language, bytes in language_bytes.items():
                             percentage = (bytes / total_bytes) * 100
-                            # 소수점 1자리
+                            # Round to one decimal place
                             language_percentage[language] = round(percentage, 1)
 
                 except Exception as e:
@@ -182,6 +332,7 @@ def sync_repo_db(request):
                             'url': repo_data.get('url'),
                             'created_at': repo_data.get('created_at'),
                             'updated_at': repo_data.get('updated_at'),
+                            'pushed_at': repo_data.get('pushed_at') or repo.get('pushed_at'),
                             'forked': repo_data.get('forked'),
                             'fork_count': repo_data.get('forks_count'),
                             'star_count': repo_data.get('stars_count'),
@@ -219,10 +370,8 @@ def sync_repo_db(request):
                     failure_repo_details.append({"github_id": github_id, "repo_name": repo_name, "message": message})
 
             # 8. Calculate the total star count for all of the student's repositories and update the student's record.
-            # Calculate the sum of `star_count` for all repositories of the student.
             total_star_count = Repository.objects.filter(owner_github_id=github_id).aggregate(total_star_count=Sum('star_count'))['total_star_count'] or 0
             student_record = Student.objects.get(id=id)
-            # Update the `starred_count` field of the Student model.
             student_record.starred_count = total_star_count
             student_record.save()
 
@@ -238,6 +387,8 @@ def sync_repo_db(request):
             "failure_student_count": failure_student_count,
             "failure_student_details": failure_student_details,
             "success_repo_count": success_repo_count,
+            "skipped_repo_count": skipped_repo_count,
+            "skipped_repo_sample": skipped_repo_sample,
             "failure_repo_count": failure_repo_count,
             "failure_repo_details": failure_repo_details
         })
@@ -245,6 +396,7 @@ def sync_repo_db(request):
     except Exception as e:
         # Handle unexpected errors during the entire process
         return JsonResponse({"status": "Error", "message": str(e)}, status=500)
+
 # ---------------------------------------------
 
 # ========================================

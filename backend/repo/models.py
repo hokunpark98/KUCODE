@@ -8,6 +8,7 @@ class Repository(models.Model):
     owner_github_id = models.CharField(max_length=100,null=True)
     created_at = models.CharField(max_length=100,null=True)
     updated_at = models.CharField(max_length=100,null=True)
+    pushed_at = models.CharField(max_length=100,null=True)
     forked = models.BooleanField(null=True)
     fork_count = models.IntegerField(null=True)
     star_count = models.IntegerField(null=True)
