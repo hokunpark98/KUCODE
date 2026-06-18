@@ -112,10 +112,15 @@ def get_latest_issue_pr_timestamp(repo_id):
     ) or GITHUB_BASELINE_TIMESTAMP
 
 
-def check_issue_pr_activity(github_id, repo_name, since):
+def check_issue_pr_activity(github_id, repo_name, since, activity_type='all'):
     response = requests.get(
         f"http://{settings.PUBLIC_IP}:{settings.FASTAPI_PORT}/api/repos/activity",
-        params={'github_id': github_id, 'repo_name': repo_name, 'since': since},
+        params={
+            'github_id': github_id,
+            'repo_name': repo_name,
+            'since': since,
+            'activity_type': activity_type,
+        },
         timeout=30,
     )
     response.raise_for_status()
@@ -178,6 +183,125 @@ def update_lightweight_repo_state(repo_record, repo_payload):
         repo_record.save(update_fields=fields_to_update)
 
 
+def is_full_sync_requested(request):
+    scope = (
+        request.GET.get('scope')
+        or request.GET.get('sync_scope')
+        or request.GET.get('crawl_scope')
+        or ''
+    ).lower()
+    force_full = (request.GET.get('force_full') or '').lower()
+    return scope in ('all', 'full') or force_full in ('1', 'true', 'yes')
+
+
+def get_sync_scope(request):
+    return 'all' if is_full_sync_requested(request) else 'changed'
+
+
+def fetch_remote_repo_payloads(github_id):
+    response = requests.get(
+        f"http://{settings.PUBLIC_IP}:{settings.FASTAPI_PORT}/api/user/repos",
+        params={'github_id': github_id},
+        timeout=60,
+    )
+    response.raise_for_status()
+    remote_repos = response.json()
+    if not isinstance(remote_repos, list):
+        raise ValueError(f"Invalid repository list for GitHub user {github_id}")
+    return {str(repo.get('id')): repo for repo in remote_repos if repo.get('id') is not None}
+
+
+def should_sync_related_repository(repo_record, repo_payload, sync_kind):
+    if repo_payload is None:
+        return True, ['remote_metadata_missing']
+
+    if sync_kind == 'commit':
+        latest_commit_at = get_latest_commit_timestamp(repo_record.id)
+        if latest_commit_at is None:
+            return True, ['no_local_commits']
+        if is_remote_timestamp_newer(repo_payload.get('pushed_at'), latest_commit_at):
+            return True, ['repository_pushed']
+        return False, []
+
+    if sync_kind == 'contributor':
+        has_contributors = Repo_contributor.objects.filter(repo_id=repo_record.id).exists()
+        if not has_contributors:
+            return True, ['no_local_contributors']
+        latest_commit_at = get_latest_commit_timestamp(repo_record.id)
+        if latest_commit_at and is_remote_timestamp_newer(repo_payload.get('pushed_at'), latest_commit_at):
+            return True, ['repository_pushed']
+        return False, []
+
+    if sync_kind in ('issue', 'pr'):
+        model = Repo_issue if sync_kind == 'issue' else Repo_pr
+        since = get_latest_model_timestamp(model, repo_record.id) or GITHUB_BASELINE_TIMESTAMP
+        try:
+            has_activity, activity_data = check_issue_pr_activity(
+                repo_record.owner_github_id,
+                repo_record.name,
+                since,
+                activity_type=sync_kind,
+            )
+        except Exception as exc:
+            print(f"  [WARN] Failed to check {sync_kind} activity for {repo_record.name}: {exc}")
+            return True, [f'{sync_kind}_activity_check_failed']
+        if has_activity:
+            latest_type = activity_data.get('latest_type') or sync_kind
+            return True, [f'{latest_type}_updated']
+        return False, []
+
+    should_sync, reasons = should_crawl_repository(repo_record, repo_payload)
+    return should_sync, reasons
+
+
+def get_repositories_for_sync(request, sync_kind):
+    repositories = get_repositories_for_crawling(request)
+    if is_full_sync_requested(request):
+        return repositories, {
+            'sync_scope': 'all',
+            'candidate_repo_count': len(repositories),
+            'skipped_repo_count': 0,
+            'skipped_repo_sample': [],
+        }
+
+    remote_by_owner = {}
+    filtered_repositories = []
+    skipped_sample = []
+
+    for repository in repositories:
+        github_id = repository.owner_github_id
+        if github_id not in remote_by_owner:
+            try:
+                remote_by_owner[github_id] = fetch_remote_repo_payloads(github_id)
+            except Exception as exc:
+                print(f"  [WARN] Failed to fetch repository metadata for {github_id}: {exc}")
+                remote_by_owner[github_id] = None
+
+        owner_payloads = remote_by_owner[github_id]
+        repo_payload = None if owner_payloads is None else owner_payloads.get(str(repository.id))
+        if owner_payloads is None:
+            filtered_repositories.append(repository)
+            continue
+
+        should_sync, reasons = should_sync_related_repository(repository, repo_payload, sync_kind)
+        if should_sync:
+            filtered_repositories.append(repository)
+        elif len(skipped_sample) < 20:
+            skipped_sample.append({
+                'github_id': github_id,
+                'repo_id': repository.id,
+                'repo_name': repository.name,
+                'reason': 'no_remote_changes',
+            })
+
+    return filtered_repositories, {
+        'sync_scope': 'changed',
+        'candidate_repo_count': len(filtered_repositories),
+        'skipped_repo_count': len(repositories) - len(filtered_repositories),
+        'skipped_repo_sample': skipped_sample,
+    }
+
+
 class HealthCheckAPIView(APIView):
     def get(self, request):
         return Response({"status": "OK"}, status=status.HTTP_200_OK)
@@ -201,6 +325,7 @@ def sync_repo_db(request):
         failure_student_count = 0
         failure_student_details = []
 
+        sync_scope = get_sync_scope(request)
         success_repo_count = 0
         skipped_repo_count = 0
         skipped_repo_sample = []
@@ -276,7 +401,10 @@ def sync_repo_db(request):
                 existing_repo = repos_by_id.get(repo_id)
                 print(f"  [{repo_count}/{total_repo_count}] Checking repository: {repo_name} (ID: {repo_id})")
 
-                should_crawl, crawl_reasons = should_crawl_repository(existing_repo, repo)
+                if is_full_sync_requested(request):
+                    should_crawl, crawl_reasons = True, ['full_sync']
+                else:
+                    should_crawl, crawl_reasons = should_crawl_repository(existing_repo, repo)
                 if not should_crawl:
                     update_lightweight_repo_state(existing_repo, repo)
                     skipped_repo_count += 1
@@ -386,6 +514,7 @@ def sync_repo_db(request):
             "success_student_count": success_student_count,
             "failure_student_count": failure_student_count,
             "failure_student_details": failure_student_details,
+            "sync_scope": sync_scope,
             "success_repo_count": success_repo_count,
             "skipped_repo_count": skipped_repo_count,
             "skipped_repo_sample": skipped_repo_sample,
@@ -758,7 +887,7 @@ def sync_repo_contributor_db(request):
 
     try:
         # 2. Fetch all repositories from the database.
-        repositories = get_repositories_for_crawling(request)
+        repositories, filter_summary = get_repositories_for_sync(request, 'contributor')
         repo_list = [{'id': repo.id, 'name': repo.name, 'github_id': repo.owner_github_id} for repo in repositories]
         total_repo_count = len(repo_list)
 
@@ -817,6 +946,10 @@ def sync_repo_contributor_db(request):
         return JsonResponse({
             "status": "OK",
             "message": "Contributor synchronization completed.",
+            "sync_scope": filter_summary['sync_scope'],
+            "candidate_repo_count": filter_summary['candidate_repo_count'],
+            "skipped_repo_count": filter_summary['skipped_repo_count'],
+            "skipped_repo_sample": filter_summary['skipped_repo_sample'],
             "success_repo_count": success_repo_count,
             "failure_repo_count": failure_repo_count,
             "failure_repo_details": failure_repo_details
@@ -860,7 +993,7 @@ def sync_repo_issue_db(request):
 
     try:
         # 2. Fetch all repositories from the database.
-        repositories = get_repositories_for_crawling(request)
+        repositories, filter_summary = get_repositories_for_sync(request, 'issue')
         repo_list = [{'id': repo.id, 'name': repo.name, 'github_id': repo.owner_github_id} for repo in repositories]
         total_repo_count = len(repo_list)
 
@@ -928,6 +1061,10 @@ def sync_repo_issue_db(request):
         return JsonResponse({
             "status": "OK",
             "message": "Repo issues synchronization completed.",
+            "sync_scope": filter_summary['sync_scope'],
+            "candidate_repo_count": filter_summary['candidate_repo_count'],
+            "skipped_repo_count": filter_summary['skipped_repo_count'],
+            "skipped_repo_sample": filter_summary['skipped_repo_sample'],
             "success_repo_count": success_repo_count,
             "failure_repo_count": failure_repo_count,
             "failure_repo_details": failure_repo_details
@@ -973,7 +1110,7 @@ def sync_repo_pr_db(request):
 
     try:
         # 2. Fetch all repositories from the database.
-        repositories = get_repositories_for_crawling(request)
+        repositories, filter_summary = get_repositories_for_sync(request, 'pr')
         repo_list = [{'id': repo.id, 'name': repo.name, 'github_id': repo.owner_github_id} for repo in repositories]
         total_repo_count = len(repo_list)
 
@@ -1042,6 +1179,10 @@ def sync_repo_pr_db(request):
         return JsonResponse({
             "status": "OK",
             "message": "Repo PRs synchronization completed.",
+            "sync_scope": filter_summary['sync_scope'],
+            "candidate_repo_count": filter_summary['candidate_repo_count'],
+            "skipped_repo_count": filter_summary['skipped_repo_count'],
+            "skipped_repo_sample": filter_summary['skipped_repo_sample'],
             "success_repo_count": success_repo_count,
             "failure_repo_count": failure_repo_count,
             "failure_repo_details": failure_repo_details
@@ -1088,7 +1229,7 @@ def sync_repo_commit_db(request):
 
     try:
         # 2. Fetch all repositories from the database.
-        repositories = get_repositories_for_crawling(request)
+        repositories, filter_summary = get_repositories_for_sync(request, 'commit')
         repo_list = [{'id': repo.id, 'name': repo.name, 'github_id': repo.owner_github_id} for repo in repositories]
         total_repo_count = len(repo_list)
 
@@ -1155,6 +1296,10 @@ def sync_repo_commit_db(request):
         return JsonResponse({
             "status": "OK",
             "message": "Repo commits synchronization completed.",
+            "sync_scope": filter_summary['sync_scope'],
+            "candidate_repo_count": filter_summary['candidate_repo_count'],
+            "skipped_repo_count": filter_summary['skipped_repo_count'],
+            "skipped_repo_sample": filter_summary['skipped_repo_sample'],
             "success_repo_count": success_repo_count,
             "failure_repo_count": failure_repo_count,
             "failure_repo_details": failure_repo_details
