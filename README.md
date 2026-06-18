@@ -117,13 +117,24 @@ This health check endpoint can be useful for monitoring the status of the backen
 - `/api`: Django API. Includes `/api/healthcheck` endpoint.
 
 ## Make crawling sh and run
+To crawl only updated repos of students in recent semester and course order, run:
 ```
 nohup ./crawling.sh > crawling.log 2>&1 &
 ```
 
-To crawl students in recent semester and course order, run:
+To crawl every repos of students in recent semester and course order, run:
 ```
-nohup ./crawling.sh --student-order=recent_courses > crawling_recent_courses.log 2>&1 &
+nohup ./crawling.sh --scope=all > crawling.log 2>&1 &
+```
+
+To crawl students in default order, run:
+```
+nohup ./crawling.sh --student-order=default > crawling.log 2>&1 &
+```
+
+To crawl every repos of students in default order, run:
+```
+nohup ./crawling.sh --scope=all --student-order=default > crawling.log 2>&1 &
 ```
 
 ## DB backup command
